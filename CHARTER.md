@@ -39,6 +39,7 @@ Private capability fork of [`deepseek-ai/deepseek-harness`](https://github.com/d
 
 - Node `v24.22.2` with `/home/sf/.nvm/versions/node/v24.22.2/bin` first on `PATH`; pnpm `11.28.5` through Corepack.
 - `pnpm run build` runs the native addon, Typert generation, the Host and Client compilers and bundles, the Desktop main-process bundle, the Web build, and both aggregate type checks. Desktop Electron packaging is not part of the build.
+- The deployed unit executes `apps/cli/lib/bin.js`, a build artifact: run `pnpm run build` before restarting after any rebase or source change, and keep `WorkingDirectory` at the clone root so its module resolution stays intact.
 
 ## Repository notes
 
