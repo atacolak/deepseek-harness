@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -27,6 +27,7 @@ afterEach(async () => {
   context = undefined
   if (root !== undefined) await rm(root, { recursive: true, force: true })
   root = undefined
+  vi.unstubAllEnvs()
 })
 
 /** Write a dist fixture and the authenticated Web rows, then boot them through the real Loader. */
@@ -301,5 +302,28 @@ describe('real Loader composition', () => {
     expect(await html.text()).toBe('<body>preview</body>')
     const index = await loaded.webServer.readResource(new Request(`${base}/`), reader)
     expect([index.status, index.headers.get('cache-control'), index.headers.get('etag')]).toEqual([200, null, null])
+  })
+})
+
+describe('mesh subnet trust', () => {
+  it('establishes a browser session for an index request from a trusted subnet', { timeout: 60_000 }, async () => {
+    vi.stubEnv('DSH_TRUST_MESH_CIDRS', '127.0.0.0/8')
+    const loaded = await loadComposition()
+    const port = loaded.webServer.port
+    if (port === undefined) throw new Error('frontend-static test: the listener has not bound a port')
+    const base = `http://127.0.0.1:${String(port)}`
+
+    const exchange = await fetch(`${base}/`, { redirect: 'manual' })
+    expect(exchange.status).toBe(303)
+    expect(exchange.headers.get('location')).toBe('./')
+    const setCookie = exchange.headers.get('set-cookie')
+    if (setCookie === null) throw new Error('mesh trust did not set a cookie')
+    expect(setCookie).toMatch(
+      /^dsh-auth-[A-Za-z0-9_-]+=v1\.[^;]+; Max-Age=2592000; Path=\/; Expires=.*; HttpOnly; SameSite=Strict$/u,
+    )
+
+    const page = await fetch(`${base}/`, { headers: { cookie: setCookie.split(';', 1)[0]! } })
+    expect(page.status).toBe(200)
+    expect(await page.text()).toContain('shell')
   })
 })

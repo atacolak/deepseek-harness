@@ -59,10 +59,11 @@ export interface WebRoute {
 
 /**
  * Answers one GET or HEAD request with a Fetch response. An HTTP request
- * arrives without a Peer and carries the client's headers; an in-process
- * {@link WebServer.readResource} read passes the Peer its caller admitted.
+ * arrives without a Peer and carries the client's headers plus its socket
+ * address; an in-process {@link WebServer.readResource} read passes the Peer
+ * its caller admitted and no address.
  */
-export type WebResource = (request: Request, peer?: PeerScope) => Promise<Response>
+export type WebResource = (request: Request, peer?: PeerScope, remoteAddress?: string) => Promise<Response>
 
 /** One named route answered by a resource instead of a handler. */
 export interface WebResourceRoute {
@@ -290,6 +291,11 @@ async function readTlsFile(field: 'certFile' | 'keyFile', path: string): Promise
 
 /** Methods a resource answers; any other method receives 405. */
 const RESOURCE_METHODS = 'GET, HEAD'
+
+/** The peer address an exchange carries; a Web Worker tunnel exchange synthesizes none. */
+function socketRemoteAddress(socket: { readonly remoteAddress?: string | undefined } | undefined): string | undefined {
+  return socket?.remoteAddress
+}
 
 /** Fetch response headers as node:http headers; each `set-cookie` value stays a separate line. */
 function nodeHeaders(headers: Headers): OutgoingHttpHeaders {
@@ -691,7 +697,11 @@ export class WebServer extends Service {
     }
     res.on('close', onClose)
     try {
-      const response = await resource(new Request(target, { method: req.method, headers, signal: abort.signal }))
+      const response = await resource(
+        new Request(target, { method: req.method, headers, signal: abort.signal }),
+        undefined,
+        socketRemoteAddress(req.socket),
+      )
       await writeResponse(res, response, req.method === 'HEAD', abort.signal)
       if (!abort.signal.aborted) {
         ended = true

@@ -63,6 +63,7 @@ function createAuth(
 function request(url: string, authority = '127.0.0.1:3080', init?: {
   cookie?: string
   method?: string
+  remoteAddress?: string
 }): ConnectionIndexRequest {
   return {
     method: init?.method ?? 'GET',
@@ -71,6 +72,7 @@ function request(url: string, authority = '127.0.0.1:3080', init?: {
       host: authority,
       ...init?.cookie === undefined ? {} : { cookie: init.cookie },
     },
+    remoteAddress: init?.remoteAddress,
   }
 }
 
@@ -90,6 +92,7 @@ function exchange(
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.unstubAllEnvs()
 })
 
 describe('API credentials', () => {
@@ -366,5 +369,152 @@ describe('BrowserAuth', () => {
 
     await expect(createAuth(new RecordCredentials(), Number.MAX_SAFE_INTEGER))
       .rejects.toThrow(/safe timestamp range/u)
+  })
+})
+
+describe('mesh subnet trust', () => {
+  const MESH_CIDRS_ENV = 'DSH_TRUST_MESH_CIDRS'
+  const authority = '10.77.67.147:3080'
+
+  it('establishes a working browser session for an index request from a trusted mesh address', async () => {
+    vi.useFakeTimers()
+    vi.stubEnv(MESH_CIDRS_ENV, '10.77.0.0/16')
+    const auth = await createAuth(new RecordCredentials())
+    const issuedAt = Date.now()
+    const res = response()
+
+    expect(auth.authorizeIndex(request('/', authority, { remoteAddress: '10.77.12.34' }), res.value)).toBe(false)
+
+    expect(res.state.status).toBe(303)
+    expect(res.state.headers?.location).toBe('./')
+    const setCookie = res.state.headers?.['set-cookie']
+    if (setCookie === undefined) throw new Error('mesh trust did not set a cookie')
+    expect(setCookie).toMatch(
+      /^dsh-auth-[A-Za-z0-9_-]+=v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+; Max-Age=2592000; Path=\/; Expires=.*; HttpOnly; SameSite=Strict$/u,
+    )
+    const [name, value] = setCookie.split(';', 1)[0]!.split('=') as [string, string]
+    expect(JSON.parse(Buffer.from(value.split('.')[1]!, 'base64url').toString('utf8')))
+      .toEqual({ version: 1, authority, issuedAt, expiresAt: issuedAt + 30 * 24 * 60 * 60 * 1000 })
+
+    const launch = new URL(auth.authenticatedUrl(`http://${authority}`))
+    const exchangeRes = response()
+    auth.authorizeIndex(request(`${launch.pathname}${launch.search}`, authority), exchangeRes.value)
+    expect(exchangeRes.state.headers?.['set-cookie']?.split(';', 1)[0]!.split('=', 1)[0]).toBe(name)
+
+    expect(auth.authorizeIndex(request('/', authority, { cookie: `${name}=${value}` }), response().value)).toBe(true)
+  })
+
+  it('treats an IPv4-mapped socket address as its IPv4 address', async () => {
+    vi.stubEnv(MESH_CIDRS_ENV, '10.77.0.0/16')
+    const auth = await createAuth(new RecordCredentials())
+    const res = response()
+
+    expect(auth.authorizeIndex(request('/', authority, { remoteAddress: '::ffff:10.77.12.34' }), res.value)).toBe(false)
+
+    expect(res.state.status).toBe(303)
+    expect(res.state.headers?.['set-cookie']).toMatch(/^dsh-auth-[A-Za-z0-9_-]+=v1\./u)
+  })
+
+  it('leaves the 401 in place when no mesh subnet is configured', async () => {
+    const unset = await createAuth(new RecordCredentials())
+    const unsetRes = response()
+    expect(unset.authorizeIndex(request('/', authority, { remoteAddress: '10.77.12.34' }), unsetRes.value)).toBe(false)
+    expect(unsetRes.state).toEqual({
+      status: 401,
+      headers: { 'cache-control': 'no-store', 'content-type': 'text/plain; charset=utf-8' },
+      body: 'dsh web authentication required; reopen the URL printed by dsh web.\n',
+    })
+
+    vi.stubEnv(MESH_CIDRS_ENV, ' , ')
+    const empty = await createAuth(new RecordCredentials())
+    const emptyRes = response()
+    expect(empty.authorizeIndex(request('/', authority, { remoteAddress: '10.77.12.34' }), emptyRes.value)).toBe(false)
+    expect(emptyRes.state.status).toBe(401)
+  })
+
+  it('refuses an index request from an address outside every configured mesh subnet', async () => {
+    vi.stubEnv(MESH_CIDRS_ENV, '10.77.0.0/16, 192.168.0.0/24')
+    const auth = await createAuth(new RecordCredentials())
+
+    for (const remoteAddress of ['192.168.1.5', '10.78.0.1', 'fd00::7', '::ffff:192.168.1.5']) {
+      const res = response()
+      expect(auth.authorizeIndex(request('/', authority, { remoteAddress }), res.value)).toBe(false)
+      expect(res.state.status).toBe(401)
+    }
+  })
+
+  it('trusts each configured mesh subnet', async () => {
+    vi.stubEnv(MESH_CIDRS_ENV, '10.77.0.0/16, 192.168.0.0/24')
+    const auth = await createAuth(new RecordCredentials())
+    const res = response()
+
+    expect(auth.authorizeIndex(request('/', authority, { remoteAddress: '192.168.0.5' }), res.value)).toBe(false)
+
+    expect(res.state.status).toBe(303)
+  })
+
+  it('refuses a mesh request that carries no socket address', async () => {
+    vi.stubEnv(MESH_CIDRS_ENV, '10.77.0.0/16')
+    const auth = await createAuth(new RecordCredentials())
+    const res = response()
+
+    expect(auth.authorizeIndex(request('/', authority), res.value)).toBe(false)
+
+    expect(res.state.status).toBe(401)
+  })
+
+  it('refuses a mesh address on a non-index target or method', async () => {
+    vi.stubEnv(MESH_CIDRS_ENV, '10.77.0.0/16')
+    const auth = await createAuth(new RecordCredentials())
+
+    for (const attempt of [{ url: '/index.html', method: 'GET' }, { url: '/', method: 'HEAD' }]) {
+      const res = response()
+      expect(auth.authorizeIndex(
+        request(attempt.url, authority, { remoteAddress: '10.77.12.34', method: attempt.method }),
+        res.value,
+      )).toBe(false)
+      expect(res.state.status).toBe(401)
+    }
+  })
+
+  it('rejects a malformed mesh subnet at activation', async () => {
+    for (const value of ['10.77.0.0/16, not-a-cidr', '10.77.0.0/33', '10.77.0.0', '10.77.0.0/16/8', '10.77.0.256/16', '10.77.0.0x/16', '10.77..0/16']) {
+      vi.stubEnv(MESH_CIDRS_ENV, value)
+      await expect(createAuth(new RecordCredentials())).rejects.toThrow(/DSH_TRUST_MESH_CIDRS/u)
+    }
+  })
+
+  it('mints a mesh session for an index request carrying a stale launch token', async () => {
+    vi.stubEnv(MESH_CIDRS_ENV, '10.77.0.0/16')
+    const auth = await createAuth(new RecordCredentials())
+    const res = response()
+
+    expect(auth.authorizeIndex(request('/?token=stale', authority, { remoteAddress: '10.77.12.34' }), res.value)).toBe(false)
+
+    expect(res.state.status).toBe(303)
+    expect(res.state.headers?.['set-cookie']).toMatch(/^dsh-auth-[A-Za-z0-9_-]+=v1\./u)
+  })
+
+  it('trusts every IPv4 address under a zero-length mesh prefix', async () => {
+    vi.stubEnv(MESH_CIDRS_ENV, '0.0.0.0/0')
+    const auth = await createAuth(new RecordCredentials())
+    const res = response()
+
+    expect(auth.authorizeIndex(request('/', authority, { remoteAddress: '203.0.113.9' }), res.value)).toBe(false)
+
+    expect(res.state.status).toBe(303)
+  })
+
+  it('refuses a mesh index request without a Host authority', async () => {
+    vi.stubEnv(MESH_CIDRS_ENV, '10.77.0.0/16')
+    const auth = await createAuth(new RecordCredentials())
+    const res = response()
+
+    expect(auth.authorizeIndex(
+      { method: 'GET', url: '/', headers: {}, remoteAddress: '10.77.12.34' },
+      res.value,
+    )).toBe(false)
+
+    expect(res.state.status).toBe(401)
   })
 })

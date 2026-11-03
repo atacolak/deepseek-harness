@@ -20,6 +20,53 @@ const COOKIE_PAYLOAD_VERSION = 1
 const STORED_SECRET_VERSION = 1
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]*$/
 const PROCESS_LAUNCH_TOKENS = new WeakMap<object, string>()
+const MESH_TRUST_ENV = 'DSH_TRUST_MESH_CIDRS'
+const IPV4_BITS = 32
+const IPV4_MAPPED_PREFIX = '::ffff:'
+const IPV4_OCTET_PATTERN = /^\d{1,3}$/u
+const IPV4_PREFIX_PATTERN = /^\d{1,2}$/u
+
+/** One trusted mesh subnet, held as the network address and its mask. */
+interface Ipv4Cidr {
+  readonly network: number
+  readonly mask: number
+}
+
+function ipv4Number(text: string): number | undefined {
+  const octets = text.split('.')
+  if (octets.length !== 4) return undefined
+  let value = 0
+  for (const octet of octets) {
+    if (!IPV4_OCTET_PATTERN.test(octet)) return undefined
+    const byte = Number(octet)
+    if (byte > 255) return undefined
+    value = value * 256 + byte
+  }
+  return value
+}
+
+function parseMeshCidr(entry: string): Ipv4Cidr {
+  const [address = '', prefix = '', ...rest] = entry.split('/')
+  const network = ipv4Number(address)
+  const bits = !IPV4_PREFIX_PATTERN.test(prefix) ? Number.NaN : Number(prefix)
+  if (rest.length > 0 || network === undefined || !Number.isInteger(bits) || bits > IPV4_BITS) {
+    throw new Error(`client-connection: ${MESH_TRUST_ENV} entry ${JSON.stringify(entry)} is not an IPv4 CIDR`)
+  }
+  const mask = bits === 0 ? 0 : (0xffffffff << (IPV4_BITS - bits)) >>> 0
+  return { network: (network & mask) >>> 0, mask }
+}
+
+/** Read `DSH_TRUST_MESH_CIDRS` as the trusted subnets; absent or empty means no mesh trust. */
+function parseMeshCidrs(raw: string | undefined): readonly Ipv4Cidr[] {
+  if (raw === undefined) return []
+  const cidrs: Ipv4Cidr[] = []
+  for (const entry of raw.split(',')) {
+    const trimmed = entry.trim()
+    if (trimmed.length === 0) continue
+    cidrs.push(parseMeshCidr(trimmed))
+  }
+  return cidrs
+}
 
 interface StoredSecretPayload {
   readonly version: typeof STORED_SECRET_VERSION
@@ -211,6 +258,7 @@ export class BrowserAuth {
     processOwner: object,
     private readonly secret: Buffer,
     maxAgeDays: number,
+    private readonly meshCidrs: readonly Ipv4Cidr[],
   ) {
     this.launchToken = processLaunchToken(processOwner)
     this.maxAgeMilliseconds = maxAgeDays * DAY_MILLISECONDS
@@ -233,7 +281,12 @@ export class BrowserAuth {
     credentials: CredentialProvider,
     maxAgeDays: number,
   ): Promise<BrowserAuth> {
-    return new BrowserAuth(processOwner, await initializeSecret(credentials), maxAgeDays)
+    return new BrowserAuth(
+      processOwner,
+      await initializeSecret(credentials),
+      maxAgeDays,
+      parseMeshCidrs(process.env[MESH_TRUST_ENV]),
+    )
   }
 
   /**
@@ -250,8 +303,9 @@ export class BrowserAuth {
   /**
    * Authenticate an index request. A valid root query token mints the cookie
    * and redirects to the directory-relative clean `./`; a valid cookie lets
-   * the caller serve the index; every other request receives the same minimal
-   * 401 response.
+   * the caller serve the index; a root request from a trusted mesh subnet
+   * mints the same cookie; every other request receives the same minimal 401
+   * response.
    * @param req - incoming root or configured-index request.
    * @param res - response owned when this method returns false.
    * @param secure - whether the listener receiving this request serves TLS; the
@@ -268,40 +322,70 @@ export class BrowserAuth {
       const authority = requestAudience(req.headers, secure)
       if (req.method === 'GET' && url.pathname === '/' && tokens.length === 1
         && authority !== undefined && tokenMatches(tokens.join(''), this.launchToken)) {
-        const issuedAt = Date.now()
-        const expiresAt = issuedAt + this.maxAgeMilliseconds
-        const value = encodeCookie({
-          version: COOKIE_PAYLOAD_VERSION,
-          authority,
-          issuedAt,
-          expiresAt,
-        }, this.secret)
-        res.writeHead(303, {
-          'cache-control': 'no-store',
-          'location': './',
-          'referrer-policy': 'no-referrer',
-          'set-cookie': sessionCookie(
-            cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000), secure,
-          ),
-        })
-        res.end()
+        this.writeSessionRedirect(req, res, secure)
         return false
       }
       if (req.method === 'GET' && url.pathname === '/' && this.isAuthenticated(req, secure)) {
-        res.writeHead(303, {
-          'cache-control': 'no-store',
-          'location': './',
-          'referrer-policy': 'no-referrer',
-        })
-        res.end()
+        this.writeCleanRedirect(res)
         return false
       }
-      this.writeUnauthorized(req, res)
+    } else if (this.isAuthenticated(req, secure)) return true
+    if (this.trustsMeshIndex(req, url)) {
+      this.writeSessionRedirect(req, res, secure)
       return false
     }
-    if (this.isAuthenticated(req, secure)) return true
     this.writeUnauthorized(req, res)
     return false
+  }
+
+  /**
+   * Whether an unauthenticated root request arrives from a configured mesh subnet.
+   * @param req - incoming index request.
+   * @param url - the request target, already parsed against the placeholder origin.
+   * @returns true only for a `GET /` whose socket address falls inside one trusted CIDR.
+   */
+  private trustsMeshIndex(req: ConnectionIndexRequest, url: URL): boolean {
+    if (this.meshCidrs.length === 0) return false
+    if (req.method !== 'GET' || url.pathname !== '/') return false
+    const remote = req.remoteAddress
+    const address = remote === undefined
+      ? undefined
+      : ipv4Number(remote.startsWith(IPV4_MAPPED_PREFIX) ? remote.slice(IPV4_MAPPED_PREFIX.length) : remote)
+    return address !== undefined && this.meshCidrs.some(cidr => ((address & cidr.mask) >>> 0) === cidr.network)
+  }
+
+  private writeSessionRedirect(req: ConnectionIndexRequest, res: ConnectionIndexResponse, secure: boolean): void {
+    const authority = requestAudience(req.headers, secure)
+    if (authority === undefined) {
+      this.writeUnauthorized(req, res)
+      return
+    }
+    const issuedAt = Date.now()
+    const expiresAt = issuedAt + this.maxAgeMilliseconds
+    const value = encodeCookie({
+      version: COOKIE_PAYLOAD_VERSION,
+      authority,
+      issuedAt,
+      expiresAt,
+    }, this.secret)
+    res.writeHead(303, {
+      'cache-control': 'no-store',
+      'location': './',
+      'referrer-policy': 'no-referrer',
+      'set-cookie': sessionCookie(
+        cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000), secure,
+      ),
+    })
+    res.end()
+  }
+
+  private writeCleanRedirect(res: ConnectionIndexResponse): void {
+    res.writeHead(303, {
+      'cache-control': 'no-store',
+      'location': './',
+      'referrer-policy': 'no-referrer',
+    })
+    res.end()
   }
 
   /**

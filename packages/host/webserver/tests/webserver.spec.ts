@@ -591,11 +591,12 @@ describe('real Loader composition', () => {
       host: string | null
       cookie: string | null
       peer: PeerScope | undefined
+      remoteAddress: string | undefined
     } | undefined
     server.register({
       kind: 'exact',
       path: '/resource',
-      resource: (request, peer) => {
+      resource: (request, peer, remoteAddress) => {
         seen = {
           url: request.url,
           method: request.method,
@@ -603,6 +604,7 @@ describe('real Loader composition', () => {
           host: request.headers.get('host'),
           cookie: request.headers.get('cookie'),
           peer,
+          remoteAddress,
         }
         const headers = new Headers({ 'content-type': 'text/plain; charset=utf-8', 'x-answer': 'yes' })
         headers.append('set-cookie', 'a=1; Path=/')
@@ -623,6 +625,7 @@ describe('real Loader composition', () => {
       host: `127.0.0.1:${String(port)}`,
       cookie: 'a=b',
       peer: undefined,
+      remoteAddress: '127.0.0.1',
     })
 
     // The status and headers arrive before the first body chunk exists.
