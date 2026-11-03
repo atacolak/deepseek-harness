@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ompLaunchArgv, ompSessionDir, parseOmpCommandInput } from '../src/bridge.ts'
+import { ompLaunchArgv, parseOmpCommandInput } from '../src/bridge.ts'
 
 describe('omp commands', () => {
   it('parses a preset and a transcript identity', () => {
@@ -17,9 +17,9 @@ describe('omp commands', () => {
     expect(parseOmpCommandInput('  ')).toEqual({})
   })
 
-  it('continues the latest transcript for attach', () => {
+  it('starts a fresh transcript when attach names none', () => {
     expect(ompLaunchArgv({ executable: 'omp', mode: 'attach', sessionDir: '/tmp/omp' })).toEqual([
-      'omp', '--mode', 'rpc', '--session-dir', '/tmp/omp', '--continue',
+      'omp', '--mode', 'rpc', '--session-dir', '/tmp/omp',
     ])
   })
 
@@ -33,9 +33,5 @@ describe('omp commands', () => {
     expect(ompLaunchArgv({ executable: 'omp', mode: 'fork', sessionDir: '/tmp/omp', sessionId: 's1' })).toEqual([
       'omp', '--mode', 'rpc', '--session-dir', '/tmp/omp',
     ])
-  })
-
-  it('scopes transcript directories per agent', () => {
-    expect(ompSessionDir('/sessions', 'agent_one' as never)).toBe('/sessions/agent_one')
   })
 })

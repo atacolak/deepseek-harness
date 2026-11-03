@@ -1,6 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import type { PresetDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 
 /** One `<agent>.md` profile OMP can mount with `--agent <name>`. */
 export interface OmpAgentPreset {
@@ -112,4 +113,67 @@ export async function discoverOmpPresets(options: OmpPresetDiscoveryOptions): Pr
     }
   }
   return presets
+}
+
+/** OMP profiles a human opens a Session with; leaf subagent profiles stay out of the roster. */
+export const HUMAN_OMP_PROFILES: readonly string[] = ['argon', 'lead', 'squad-actor']
+
+/**
+ * Keep only the profiles a human may open a Session with.
+ * @param presets - discovered OMP profiles in precedence order.
+ * @returns the human-facing subset, preserving discovery order.
+ */
+export function humanOmpPresets(presets: readonly OmpAgentPreset[]): OmpAgentPreset[] {
+  return presets.filter(preset => HUMAN_OMP_PROFILES.includes(preset.name))
+}
+
+/** Prefix marking a harness agent preset that mounts one OMP profile. */
+export const OMP_PRESET_PREFIX = 'omp:'
+
+/**
+ * Build the harness preset identity for one OMP profile.
+ * @param profile - profile name OMP resolves from `<agent>.md`.
+ * @returns the prefixed preset id.
+ */
+export function ompPresetId(profile: string): string {
+  return `${OMP_PRESET_PREFIX}${profile}`
+}
+
+/**
+ * Read the OMP profile name out of a harness preset id.
+ * @param id - harness preset identity.
+ * @returns the profile name, or undefined when the preset is not an OMP one.
+ */
+export function ompProfileOfPreset(id: string): string | undefined {
+  if (!id.startsWith(OMP_PRESET_PREFIX)) return undefined
+  const profile = id.slice(OMP_PRESET_PREFIX.length)
+  return profile.length === 0 ? undefined : profile
+}
+
+/**
+ * Roster order for one discovered profile. `argon` leads; every other profile
+ * shares the next slot so the roster stays alphabetical behind it.
+ * @param name - profile name.
+ * @returns the preset order.
+ */
+export function ompPresetOrder(name: string): number {
+  return name === 'argon' ? 1 : 5
+}
+
+/**
+ * Declare one discovered profile as an agent preset whose composition is
+ * empty: every step of an OMP session is served by the OMP process itself, so
+ * the harness adds no second set of tools or prompt sections over it.
+ * @param preset - discovered OMP profile.
+ * @param order - roster position from {@link ompPresetOrder}.
+ * @returns the preset declaration the registry accepts.
+ */
+export function ompPresetDefinition(preset: OmpAgentPreset, order: number): PresetDefinition {
+  return {
+    id: ompPresetId(preset.name),
+    name: preset.name,
+    ...preset.description === undefined ? {} : { description: preset.description },
+    order,
+    plugins: [],
+  }
 }

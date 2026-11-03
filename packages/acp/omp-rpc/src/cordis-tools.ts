@@ -4,7 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { OmpHostToolHandler } from './host-tools.ts'
-import type { OmpHostToolContent } from './types.ts'
+import type { OmpHostToolContent, OmpHostToolDefinition } from './types.ts'
 
 /** Harness tools the bridge publishes by default: discovery plus profile management. */
 export const DEFAULT_OMP_HOST_TOOLS: readonly string[] = [
@@ -19,6 +19,25 @@ export interface OmpCordisToolOptions {
   readonly agent: Agent
   /** Exact registered tool names to publish; unknown names are skipped. */
   readonly names: readonly string[]
+}
+
+/**
+ * Project one harness tool definition onto OMP's host-tool surface. Cordis
+ * tools stay discoverable: OMP lists them for tool search and loads a full
+ * schema only when the model asks for it.
+ * @param definition - harness tool definition the agent can resolve.
+ * @returns the OMP-facing name, description, parameters, and load mode.
+ */
+export function ompHostToolDefinition(
+  definition: Pick<ToolDefinition, 'name' | 'description' | 'parameters'>,
+): OmpHostToolDefinition {
+  return {
+    name: definition.name,
+    label: definition.name,
+    description: definition.description,
+    parameters: definition.parameters,
+    loadMode: 'discoverable',
+  }
 }
 
 function textOf(content: readonly ContentBlock[]): string {
@@ -71,12 +90,7 @@ export function ompCordisHostTools(options: OmpCordisToolOptions): OmpHostToolHa
     const definition = definitions.get(name)
     if (definition === undefined) continue
     handlers.push({
-      definition: {
-        name: definition.name,
-        label: definition.name,
-        description: definition.description,
-        parameters: definition.parameters,
-      },
+      definition: ompHostToolDefinition(definition),
       async execute(args, signal) {
         const callId = ToolCallId(`omp-host-${randomUUID()}`)
         const batch = await options.ctx.tools.execute({

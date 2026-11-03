@@ -1,5 +1,4 @@
 import { mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStepStream } from '@deepseek-ai/dsh-agent'
 import { createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -22,8 +21,10 @@ export interface OmpAttachOptions {
   readonly mode: OmpAttachMode
   /** Profile name passed as `--agent`; omitted uses OMP's default profile. */
   readonly preset?: string
-  /** Existing OMP transcript for `attach`; omitted continues the newest one. */
+  /** Existing OMP transcript for `attach`; omitted starts a fresh transcript. */
   readonly sessionId?: string
+  /** Exact transcript path to resume for `attach`; wins over {@link sessionId}. */
+  readonly resumePath?: string
   /** Provider/model the OMP gateway should serve for this attachment. */
   readonly selection?: OmpModelSelection
   /** Directory holding OMP transcripts for this attachment. */
@@ -69,8 +70,8 @@ export function parseOmpCommandInput(rawInput: string): OmpCommandInput {
 
 /**
  * Build the OMP RPC argv for one attachment. Fork starts a fresh transcript so
- * the harness history is replayed into it; attach resumes an existing OMP
- * session and trusts the history OMP already owns.
+ * the harness history is replayed into it; attach resumes an explicitly named
+ * transcript, and starts a fresh one in the shared OMP root when none is named.
  * @param options - executable, mode, profile, and transcript directory.
  * @returns argv beginning with the OMP executable.
  */
@@ -80,10 +81,14 @@ export function ompLaunchArgv(options: {
   readonly sessionDir: string
   readonly preset?: string
   readonly sessionId?: string
+  readonly resumePath?: string
 }): string[] {
   const argv = [options.executable, '--mode', 'rpc', '--session-dir', options.sessionDir]
   if (options.preset !== undefined) argv.push('--agent', options.preset)
-  if (options.mode === 'attach') argv.push(...options.sessionId === undefined ? ['--continue'] : ['--resume', options.sessionId])
+  if (options.mode === 'attach') {
+    if (options.resumePath !== undefined) argv.push('--resume', options.resumePath)
+    else if (options.sessionId !== undefined) argv.push('--resume', options.sessionId)
+  }
   return argv
 }
 
@@ -177,6 +182,15 @@ export class OmpBridge {
   }
 
   /**
+   * Whether one harness session already has a live OMP process bound to it.
+   * @param id - harness session identity.
+   * @returns true while an attachment is registered.
+   */
+  attached(id: SessionId): boolean {
+    return this.attachments.has(id)
+  }
+
+  /**
    * Stop the OMP process attached to one session.
    * @param id - harness session identity.
    */
@@ -226,18 +240,5 @@ export class OmpBridge {
       message: createToolResultMessage({ callId, content, isError: event.isError }),
     }, { surfaceOp: 'append' })
   }
-}
-
-
-/**
- * Build the transcript directory for one harness session under the configured
- * root. Each harness session gets an isolated OMP session directory so
- * `--continue` never attaches two agents to one transcript.
- * @param root - configured root directory.
- * @param id - harness session identity.
- * @returns absolute directory path.
- */
-export function ompSessionDir(root: string, id: SessionId): string {
-  return join(root, id)
 }
 
