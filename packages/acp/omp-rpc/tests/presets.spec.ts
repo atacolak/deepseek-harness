@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { discoverOmpPresets, humanOmpPresets, ompPresetOrder } from '../src/presets.ts'
+import { discoverOmpPresets, ompPresetOrder } from '../src/presets.ts'
 
 const roots: string[] = []
 
@@ -53,19 +53,6 @@ describe('discoverOmpPresets', () => {
 
     expect(presets.map(preset => preset.name)).toEqual(['planner'])
     expect(presets[0]?.description).toBeUndefined()
-  })
-})
-
-describe('humanOmpPresets', () => {
-  it('keeps only the human profiles in discovery order', () => {
-    const presets = [
-      { name: 'argon', path: '/a', scope: 'user' as const },
-      { name: 'builder', path: '/b', scope: 'user' as const },
-      { name: 'lead', path: '/c', scope: 'user' as const },
-      { name: 'scout', path: '/d', scope: 'user' as const },
-      { name: 'squad-actor', path: '/e', scope: 'user' as const },
-    ]
-    expect(humanOmpPresets(presets).map(preset => preset.name)).toEqual(['argon', 'lead', 'squad-actor'])
   })
 })
 

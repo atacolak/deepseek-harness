@@ -16,6 +16,7 @@ import {
   type ContentBlock,
 } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { normalizeSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 
 /** A resume or open request the HTTP surface can report with a stable status. */
@@ -242,8 +243,12 @@ export async function probeOmpSessionLease(
   }
 }
 
-/** One harness surface event reconstructed from a recorded OMP message. */
+/** One harness session event reconstructed from a recorded OMP transcript. */
 export type OmpHydrationEvent =
+  | { readonly type: 'turn/start'; readonly data: SessionEvent<'turn/start'>['data'] }
+  | { readonly type: 'turn/end'; readonly data: SessionEvent<'turn/end'>['data'] }
+  | { readonly type: 'step/start'; readonly data: SessionEvent<'step/start'>['data'] }
+  | { readonly type: 'step/end'; readonly data: SessionEvent<'step/end'>['data'] }
   | { readonly type: 'user/message'; readonly data: SessionEvent<'user/message'>['data'] }
   | { readonly type: 'assistant/message'; readonly data: SessionEvent<'assistant/message'>['data'] }
   | { readonly type: 'tool/result'; readonly data: SessionEvent<'tool/result'>['data'] }
@@ -316,19 +321,91 @@ function assistantBlocks(content: unknown): ContentBlock[] {
   return blocks
 }
 
+/** Maximum UTF-8 bytes of a hydrated OMP title, matching the title service default. */
+const OMP_TITLE_MAX_BYTES = 200
+
+interface TranscriptTitleEntry {
+  readonly type?: unknown
+  readonly title?: unknown
+  readonly updatedAt?: unknown
+  readonly timestamp?: unknown
+}
+
 /**
- * Rebuild the harness surface events a real OMP transcript recorded, so an
- * opened or resumed session shows the same user, assistant, and tool bubbles
- * instead of one summarized seed message.
+ * Read the newest non-empty title recorded by one OMP transcript.
+ *
+ * OMP keeps the current title on the transcript's first `title` line and also
+ * appends `title_change` records; the newest timestamp wins, and file order
+ * breaks ties.
  * @param path - transcript path.
- * @param limit - maximum surface events returned, newest last.
+ * @returns the normalized title, or undefined when the transcript carries none.
+ */
+export async function readOmpTranscriptTitle(path: string): Promise<string | undefined> {
+  const text = await readFile(path, 'utf8')
+  let newest: { readonly title: string; readonly at: number } | undefined
+  for (const line of text.split('\n')) {
+    if (line.trim().length === 0) continue
+    let entry: TranscriptTitleEntry
+    try {
+      entry = JSON.parse(line) as TranscriptTitleEntry
+    } catch {
+      continue
+    }
+    if (entry.type !== 'title' && entry.type !== 'title_change' && entry.type !== 'session') continue
+    if (typeof entry.title !== 'string') continue
+    const title = normalizeSessionTitle(entry.title, OMP_TITLE_MAX_BYTES)
+    if (title.length === 0) continue
+    const stamp = typeof entry.updatedAt === 'string' ? entry.updatedAt : entry.timestamp
+    const parsed = typeof stamp === 'string' ? Date.parse(stamp) : Number.NaN
+    const at = Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY
+    if (newest === undefined || at >= newest.at) newest = { title, at }
+  }
+  return newest?.title
+}
+
+/**
+ * Rebuild the harness session events a real OMP transcript recorded, so an
+ * opened or resumed session shows the same user, assistant, and tool bubbles
+ * instead of one summarized seed message. Turn and step boundaries make those
+ * bubbles visible to projections that require them.
+ * @param path - transcript path.
+ * @param limit - maximum events selected from the newest complete turns; the newest turn is always included.
  * @returns ordered events ready to append to a blank harness session.
  */
 export async function ompHydrationEvents(path: string, limit = 200): Promise<OmpHydrationEvent[]> {
   const text = await readFile(path, 'utf8')
-  const events: OmpHydrationEvent[] = []
+  const turns: OmpHydrationEvent[][] = []
+  let current: OmpHydrationEvent[] | undefined
   let turn = 0
   let step = 0
+  let stepHasAssistant = false
+
+  const closeTurn = (): void => {
+    if (current === undefined) return
+    current.push({ type: 'step/end', data: { turn, step } })
+    current.push({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+    turns.push(current)
+    current = undefined
+    stepHasAssistant = false
+  }
+  const openTurn = (): OmpHydrationEvent[] => {
+    turn += 1
+    step = 1
+    stepHasAssistant = false
+    const events: OmpHydrationEvent[] = [
+      { type: 'turn/start', data: { turn } },
+      { type: 'step/start', data: { turn, step } },
+    ]
+    current = events
+    return events
+  }
+  const openStep = (events: OmpHydrationEvent[]): void => {
+    events.push({ type: 'step/end', data: { turn, step } })
+    step += 1
+    stepHasAssistant = false
+    events.push({ type: 'step/start', data: { turn, step } })
+  }
+
   for (const line of text.split('\n')) {
     if (line.trim().length === 0) continue
     let entry: TranscriptMessageEntry
@@ -343,9 +420,8 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
     if (message.role === 'user') {
       const content = textBlocks(message.content)
       if (content.length === 0) continue
-      turn += 1
-      step = 0
-      events.push({
+      closeTurn()
+      openTurn().push({
         type: 'user/message',
         data: createUserMessage({ content, source: { kind: 'user' } }),
       })
@@ -354,8 +430,8 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
     if (message.role === 'assistant') {
       const content = assistantBlocks(message.content)
       if (content.length === 0) continue
-      if (turn === 0) turn = 1
-      step += 1
+      const events = current ?? openTurn()
+      if (stepHasAssistant) openStep(events)
       const provider = typeof message.provider === 'string' && message.provider.length > 0 ? message.provider : 'omp'
       const model = typeof message.model === 'string' && message.model.length > 0 ? message.model : 'omp'
       events.push({
@@ -367,12 +443,12 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
           stream: [],
         },
       })
+      stepHasAssistant = true
       continue
     }
     if (message.role === 'toolResult' && typeof message.toolCallId === 'string' && message.toolCallId.length > 0) {
       const content = textBlocks(message.content)
-      if (turn === 0) turn = 1
-      step += 1
+      const events = current ?? openTurn()
       events.push({
         type: 'tool/result',
         data: {
@@ -387,20 +463,46 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
       })
     }
   }
-  return events.slice(-limit)
+  closeTurn()
+
+  const selected: OmpHydrationEvent[][] = []
+  let total = 0
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const events = turns[index] as OmpHydrationEvent[]
+    if (selected.length > 0 && total + events.length > limit) break
+    selected.unshift(events)
+    total += events.length
+  }
+  return selected.flat()
 }
 
 /**
- * Append a transcript's recorded surface events to a blank harness session.
+ * Append a transcript's recorded title and surface events to a blank harness session.
  * @param session - live session receiving the events.
  * @param path - transcript path.
- * @param limit - maximum surface events hydrated, newest last.
+ * @param limit - maximum events selected from the newest complete turns; the newest turn is always included.
  * @returns number of appended events.
  */
 export async function hydrateOmpSession(session: Session, path: string, limit = 200): Promise<number> {
+  const title = await readOmpTranscriptTitle(path)
   const events = await ompHydrationEvents(path, limit)
+  if (title !== undefined) {
+    session.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } })
+  }
   for (const event of events) {
     switch (event.type) {
+      case 'turn/start':
+        session.append('turn/start', event.data)
+        break
+      case 'turn/end':
+        session.append('turn/end', event.data)
+        break
+      case 'step/start':
+        session.append('step/start', event.data)
+        break
+      case 'step/end':
+        session.append('step/end', event.data)
+        break
       case 'user/message':
         session.append('user/message', event.data, { surfaceOp: 'append' })
         break
@@ -412,5 +514,5 @@ export async function hydrateOmpSession(session: Session, path: string, limit = 
         break
     }
   }
-  return events.length
+  return events.length + (title === undefined ? 0 : 1)
 }

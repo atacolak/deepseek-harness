@@ -269,7 +269,7 @@ export function renderMessages(messages: readonly RequestMessage[], from: number
 
 function renderMessage(message: RequestMessage): string {
   if (message.role === 'system') return `<system>\n${textOf(message.content)}\n</system>`
-  if (message.role === 'user') return `<user>\n${textOf(message.content)}\n</user>`
+  if (message.role === 'user') return textOf(message.content)
   if (message.role === 'assistant') return `<assistant>\n${textOf(message.content)}\n</assistant>`
   return ''
 }

@@ -33,6 +33,15 @@
       "path": "../../util/values"
     },
     {
+      "path": "../../util/home-paths"
+    },
+    {
+      "path": "../../session/session-title"
+    },
+    {
+      "path": "../../workspace/workspace"
+    },
+    {
       "path": "../../subprocess/subprocess"
     },
     {

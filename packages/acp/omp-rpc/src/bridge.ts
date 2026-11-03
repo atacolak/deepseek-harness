@@ -40,6 +40,27 @@ export interface OmpAttachment {
   readonly client: OmpRpcClient
   readonly launched: LaunchedOmp
   readonly catalog: CatalogSyncOutcome
+  /** Session identity and transcript path OMP reports as active. */
+  readonly session: { readonly id: string; readonly path?: string }
+  /** Working directory the OMP process was launched in. */
+  readonly cwd: string
+}
+
+async function activeSessionOf(client: OmpRpcClient): Promise<OmpAttachment['session']> {
+  const state = await client.request({ type: 'get_state' })
+  if (typeof state !== 'object' || state === null || Array.isArray(state)) {
+    throw new Error('OMP get_state returned no session state')
+  }
+  const record = state as Record<string, unknown>
+  if (typeof record.sessionId !== 'string' || record.sessionId.length === 0) {
+    throw new Error('OMP get_state returned no session id')
+  }
+  return {
+    id: record.sessionId,
+    ...typeof record.sessionFile === 'string' && record.sessionFile.length > 0
+      ? { path: record.sessionFile }
+      : {},
+  }
 }
 
 /** Collaborators shared by every attachment in one bridge plugin. */
@@ -141,6 +162,7 @@ export class OmpBridge {
       await launched.ready
       client = launched.client
       await client.negotiateProtocol()
+      const session = await activeSessionOf(client)
       const selection = options.selection ?? agent.model.current()
       const catalog = await new OmpModelCatalogSync(client, selection).sync()
       const hostTools = new OmpHostToolBridge({
@@ -174,7 +196,7 @@ export class OmpBridge {
       await hostTools.sync()
       this.attachments.set(agent.id, live)
       agent.ctx.effect(() => () => this.detach(agent.id), 'omp-rpc attachment')
-      return { client, launched, catalog }
+      return { client, launched, catalog, session, cwd: options.cwd }
     } catch (error: unknown) {
       await launched.close()
       throw error

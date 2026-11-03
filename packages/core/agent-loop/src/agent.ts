@@ -323,7 +323,11 @@ export class ReactLoopAgent implements Agent {
     return !headerEquals(baseline, canonicalHeader({ ...baseline, tools: [...tools] }))
   }
 
-  /** Open one turn before claiming its first proposed step. */
+  /**
+   * Open one turn before claiming its first proposed step. The durable turn
+   * boundary wins over the phase counter when a plugin appended transcript
+   * turns after this loop was created, as structured hydration does.
+   */
   private async turn(): Promise<boolean> {
     if (this.phase.kind !== 'running') {
       this.throwError(new Error(`agent "${this.id}": turn without driver reservation`))
@@ -331,7 +335,7 @@ export class ReactLoopAgent implements Agent {
     const phase = this.phase
     const { signal } = phase.abort
     signal.throwIfAborted()
-    const turn = phase.turn + 1
+    const turn = Math.max(phase.turn, this.loopCtx.agents.turnBoundaryOf(this.session).lastTurn) + 1
     try {
       this.session.append('turn/start', { turn })
     } catch (error: unknown) {

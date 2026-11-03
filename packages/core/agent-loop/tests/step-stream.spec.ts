@@ -84,4 +84,22 @@ describe('agent/step-stream seam', () => {
       .toEqual([{ type: 'text', text: 'from adapter' }])
     expect(adapter.requests).toHaveLength(1)
   })
+
+  it('advances past transcript turns appended after the loop was created', async () => {
+    const adapter = new MockAdapter([textResponse('after hydration')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('hydrated-turns'), { provider: 'mock', model: 'mock' })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    const idle = waitForIdle(ctx, agent)
+    send(agent, 'continue')
+    await idle
+
+    const events = agent.session.snapshotEvents()
+    const starts = events.filter(event => event.type === 'turn/start')
+    const message = events.find(event => event.type === 'assistant/message')
+    expect(starts.map(event => event.data.turn)).toEqual([1, 2])
+    expect(message?.type === 'assistant/message' ? message.data.turn : undefined).toBe(2)
+  })
 })

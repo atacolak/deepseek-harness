@@ -1,8 +1,9 @@
 /**
  * Cordis composition of the OMP RPC bridge: auto-discovered `omp:<profile>`
- * agent presets, turn-1 auto-attach, `/omp-attach`, `/omp-resume`, and
- * `/omp-fork` commands, `POST /api/exocortex/omp/open`, per-agent step
- * streams, host tools, extension UI, catalog sync, and trajectory projection.
+ * agent presets, durable reattachment of OMP-preset sessions, `/omp-attach`,
+ * `/omp-resume`, and `/omp-fork` commands, `POST /api/exocortex/omp/open`,
+ * per-agent step streams, host tools, extension UI, catalog sync, and
+ * trajectory projection.
  * @module @deepseek-ai/dsh-omp-rpc
  */
 
@@ -16,7 +17,9 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-workspace'
 import Schema from '@deepseek-ai/schemastery'
+import { defaultOmpBindingsFile, OmpBindings } from './bindings.ts'
 import {
   OmpBridge,
   parseOmpCommandInput,
@@ -27,7 +30,6 @@ import { DEFAULT_OMP_HOST_TOOLS } from './cordis-tools.ts'
 import { OMP_OPEN_PATH, serveOmpOpen } from './open.ts'
 import {
   discoverOmpPresets,
-  humanOmpPresets,
   ompPresetDefinition,
   ompPresetId,
   ompPresetOrder,
@@ -45,6 +47,7 @@ import {
 import type { OmpUiAsker } from './ui.ts'
 import type { OmpExtensionUiRequest } from './types.ts'
 
+export * from './bindings.ts'
 export * from './bridge.ts'
 export * from './catalog.ts'
 export * from './client.ts'
@@ -79,8 +82,10 @@ export interface OmpRpcConfig {
   readonly cwd?: string
   /** Home directory owning `~/.omp/agent/agents`; defaults to the process home. */
   readonly home?: string
-  /** Attach every OMP-preset session to OMP on its first turn. */
+  /** Attach every OMP-preset session to OMP before its first step, resuming its durable transcript binding. */
   readonly autoAttach?: boolean
+  /** Durable session-to-transcript bindings file; defaults to `$DSH_HOME/omp/bindings.json`. */
+  readonly bindingsFile?: string
   /** Optional extension UI answerer supplied by a composed surface. */
   readonly asker?: OmpUiAsker
   /** Receives non-interactive OMP extension UI surfaces. */
@@ -96,6 +101,7 @@ export const Config: Schema<OmpRpcConfig> = Schema.object({
   cwd: Schema.string(),
   home: Schema.string(),
   autoAttach: Schema.boolean(),
+  bindingsFile: Schema.string(),
   asker: Schema.any(),
   onSurface: Schema.any(),
 })
@@ -117,6 +123,11 @@ function sessionIsBlank(session: { snapshotEvents(): readonly { readonly type: s
 async function existingDirectory(path: string): Promise<boolean> {
   const info = await stat(path).catch(() => undefined)
   return info?.isDirectory() === true
+}
+
+async function existingFile(path: string): Promise<boolean> {
+  const info = await stat(path).catch(() => undefined)
+  return info?.isFile() === true
 }
 
 /** What one resolved transcript open produced. */
@@ -167,6 +178,58 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     return preset === undefined ? undefined : ompProfileOfPreset(preset)
   }
 
+  const bindings = new OmpBindings(config.bindingsFile ?? defaultOmpBindingsFile())
+
+  const warn = (message: string, error?: unknown): void => {
+    ctx.logger.warn(`[omp-rpc] ${message}${error === undefined ? '' : `: ${error instanceof Error ? error.message : String(error)}`}`)
+  }
+
+  const forgetBinding = async (id: SessionId): Promise<void> => {
+    try {
+      await bindings.delete(id)
+    } catch (error: unknown) {
+      warn(`cannot drop binding for session "${id}"`, error)
+    }
+  }
+
+  const rememberBinding = async (agent: Agent, attachment: OmpAttachment, profile?: string): Promise<void> => {
+    if (attachment.session.path === undefined) {
+      await forgetBinding(agent.id)
+      return
+    }
+    try {
+      await bindings.set(agent.id, {
+        ompSessionId: attachment.session.id,
+        path: attachment.session.path,
+        cwd: attachment.cwd,
+        ...profile === undefined ? {} : { profile },
+        updatedAt: new Date().toISOString(),
+      })
+    } catch (error: unknown) {
+      warn(`cannot persist binding for session "${agent.id}"`, error)
+    }
+  }
+
+  const readBinding = async (id: SessionId) => {
+    try {
+      return await bindings.get(id)
+    } catch (error: unknown) {
+      warn(`cannot read binding for session "${id}"`, error)
+      return undefined
+    }
+  }
+
+  const pinOpenedSession = async (agent: Agent, profile: string | undefined): Promise<void> => {
+    if (profile !== 'argon') return
+    const registry = ctx.get('workspaceRegistry')
+    if (registry === undefined) return
+    try {
+      await registry.pinSession(agent.id)
+    } catch (error: unknown) {
+      warn(`cannot pin argon session "${agent.id}"`, error)
+    }
+  }
+
   const resolveTranscript = async (prefix: string): Promise<OmpTranscriptMatch> => {
     try {
       return await resolveOmpTranscript(sessionsRoot, prefix)
@@ -207,6 +270,8 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     const hydrated = sessionIsBlank(agent.session)
       ? await hydrateOmpSession(agent.session, transcript.path)
       : 0
+    await rememberBinding(agent, attachment, profile)
+    await pinOpenedSession(agent, profile)
     return {
       transcript,
       hydrated,
@@ -238,10 +303,28 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
   ctx.inject(['agentPresets'], (presetCtx) => {
     if (config.autoAttach !== false) {
       ctx.on('agent/pre-step', async (payload, next) => {
-        if (payload.turn !== 1 || payload.step !== 1 || bridge.attached(payload.agent.id)) return next()
+        if (bridge.attached(payload.agent.id)) return next()
         const profile = profileOf(payload.agent)
         if (profile === undefined) return next()
-        await bridge.attach(payload.agent, attachOptions(payload.agent, { mode: 'attach', preset: profile }))
+        const binding = await readBinding(payload.agent.id)
+        const resumePath = binding !== undefined && await existingFile(binding.path) ? binding.path : undefined
+        let attachment: OmpAttachment
+        try {
+          attachment = await bridge.attach(payload.agent, attachOptions(payload.agent, {
+            mode: 'attach',
+            preset: profile,
+            ...resumePath === undefined ? {} : { resumePath },
+          }))
+        } catch (error: unknown) {
+          if (resumePath === undefined) throw error
+          warn(`cannot resume transcript ${resumePath}; starting a fresh OMP session`, error)
+          await forgetBinding(payload.agent.id)
+          attachment = await bridge.attach(payload.agent, attachOptions(payload.agent, {
+            mode: 'attach',
+            preset: profile,
+          }))
+        }
+        await rememberBinding(payload.agent, attachment, profile)
         return next()
       })
     }
@@ -249,7 +332,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
       cwd: config.cwd ?? process.cwd(),
       ...config.home === undefined ? {} : { home: config.home },
     }).then(async presets => {
-      const ordered = humanOmpPresets(presets).sort((left, right) => left.name.localeCompare(right.name))
+      const ordered = presets.sort((left, right) => left.name.localeCompare(right.name))
       for (const preset of ordered) {
         await presetCtx.agentPresets.register(ompPresetDefinition(preset, ompPresetOrder(preset.name)))
       }
@@ -294,6 +377,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
           mode: 'fork',
           ...input,
         }))
+        await rememberBinding(invocation.agent, attachment, input.preset)
         return { kind: 'success', text: attachmentSummary('fork', attachment) }
       } catch (error: unknown) {
         return { kind: 'error', text: error instanceof Error ? error.message : String(error) }

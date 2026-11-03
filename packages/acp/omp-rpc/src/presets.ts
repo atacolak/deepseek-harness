@@ -115,18 +115,6 @@ export async function discoverOmpPresets(options: OmpPresetDiscoveryOptions): Pr
   return presets
 }
 
-/** OMP profiles a human opens a Session with; leaf subagent profiles stay out of the roster. */
-export const HUMAN_OMP_PROFILES: readonly string[] = ['argon', 'lead', 'squad-actor']
-
-/**
- * Keep only the profiles a human may open a Session with.
- * @param presets - discovered OMP profiles in precedence order.
- * @returns the human-facing subset, preserving discovery order.
- */
-export function humanOmpPresets(presets: readonly OmpAgentPreset[]): OmpAgentPreset[] {
-  return presets.filter(preset => HUMAN_OMP_PROFILES.includes(preset.name))
-}
-
 /** Prefix marking a harness agent preset that mounts one OMP profile. */
 export const OMP_PRESET_PREFIX = 'omp:'
 

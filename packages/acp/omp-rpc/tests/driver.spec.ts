@@ -186,9 +186,9 @@ describe('OmpEventTranslator', () => {
 })
 
 describe('renderMessages', () => {
-  it('renders every message from the requested index with its role', () => {
+  it('renders user text plainly and labels the replayed non-user roles', () => {
     const text = renderMessages([user('u1', 'first'), assistant('a1', 'reply'), user('u2', 'second')], 1)
-    expect(text).toBe('<assistant>\nreply\n</assistant>\n\n<user>\nsecond\n</user>')
+    expect(text).toBe('<assistant>\nreply\n</assistant>\n\nsecond')
   })
 })
 
@@ -215,7 +215,7 @@ describe('OmpAgentDriver', () => {
 
     expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
     expect(client.commands.map(command => command.type)).toEqual(['new_session', 'prompt'])
-    expect(client.promptText(0)).toBe('<user>\nhello\n</user>')
+    expect(client.promptText(0)).toBe('hello')
 
     const second = request([...first.messages, assistant('a1', 'hi'), user('u2', 'again')])
     const consumeAgain = (async () => {
@@ -228,7 +228,7 @@ describe('OmpAgentDriver', () => {
     settlePrompt(client)
     await consumeAgain
     expect(client.commands.filter(command => command.type === 'new_session')).toHaveLength(1)
-    expect(client.promptText(1)).toBe('<user>\nagain\n</user>')
+    expect(client.promptText(1)).toBe('again')
   })
 
   it('restarts a replay session when the assembled history shrinks', async () => {
@@ -260,7 +260,7 @@ describe('OmpAgentDriver', () => {
     settlePrompt(client)
     await consumeCompacted
     expect(client.commands.filter(command => command.type === 'new_session')).toHaveLength(2)
-    expect(client.promptText(1)).toBe('<user>\nfresh start\n</user>')
+    expect(client.promptText(1)).toBe('fresh start')
   })
 
   it('sends only the newest user message when attaching to an existing session', async () => {
@@ -277,7 +277,7 @@ describe('OmpAgentDriver', () => {
     settlePrompt(client)
     await consume
     expect(client.commands.map(command => command.type)).toEqual(['prompt'])
-    expect(client.promptText(0)).toBe('<user>\nnew question\n</user>')
+    expect(client.promptText(0)).toBe('new question')
   })
 
   it('settles an errored run from prompt_result even without a terminal message error', async () => {
