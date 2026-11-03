@@ -127,6 +127,7 @@
     "@deepseek-ai/dsh-deepseek-account-platform": "workspace:*",
     "@deepseek-ai/dsh-config-editor": "workspace:*",
     "@deepseek-ai/dsh-settings": "workspace:*",
+    "@deepseek-ai/dsh-omp-rpc": "workspace:*",
     "@deepseek-ai/dsh-otel": "workspace:*",
     "@deepseek-ai/dsh-working-directory": "workspace:*",
     "@deepseek-ai/dsh-tool-working-directory": "workspace:*",

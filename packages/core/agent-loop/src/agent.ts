@@ -477,6 +477,11 @@ export class ReactLoopAgent implements Agent {
       }
       firstAttempt = false
       const request = this.buildRequest(config, preparedCall, assembly.tools, { turn, step }, startsRequestSeries, signal)
+      const stepStream = await this.dispatch.waterfall(
+        'agent/step-stream',
+        { turn, step, selection: decision.selection, request, signal },
+        () => Promise.resolve(undefined),
+      )
       const live = new AssistantStreamAttempt(
         this.session.id,
         ++this.assistantAttemptCounter,
@@ -487,7 +492,7 @@ export class ReactLoopAgent implements Agent {
       )
       let started = false
       try {
-        const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
+        const stream = stepStream?.(request, signal) ?? preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
         signal.throwIfAborted()
         live.start()
         started = true

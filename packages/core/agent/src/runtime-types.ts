@@ -8,7 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type {
-  LlmAttemptId, LlmCallConfig, LlmFailure, MessageId, ReasoningEffortId, ResolvedRetryPolicy, StreamChunk,
+  LlmAttemptId, LlmCallConfig, LlmFailure, MessageId, ReasoningEffortId, ResolvedRetryPolicy, StreamChunk, GenerateOptions,
 } from '@deepseek-ai/dsh-llm'
 import type { AgentCancelCause, Session, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
@@ -147,6 +147,17 @@ export type PreStepDecision =
 
 /** Action returned by a listener that owns model-request recovery. */
 export type RequestErrorAction = { kind: 'retry' } | undefined
+
+/**
+ * One model-request stream produced outside the registered LLM adapters, such
+ * as a long-lived external agent process that owns its own model loop. The
+ * stream must yield the same chunk vocabulary an adapter does, ending with one
+ * usage and one finish frame.
+ * @param request - the fully assembled request the loop was about to send.
+ * @param signal - the step's abort signal.
+ * @returns the assistant chunk stream.
+ */
+export type AgentStepStream = (request: GenerateOptions, signal: AbortSignal) => AsyncIterable<StreamChunk>
 
 /** Why a session lifecycle began; seeded creates are `startup`, while persisted loads are `resume`. */
 export type SessionStartSource = 'startup' | 'resume' | 'clear' | 'compact'
@@ -371,6 +382,24 @@ declare module '@deepseek-ai/cordis' {
      * @mode waterfall
     */
     'agent/request'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; signal: AbortSignal }, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig>
+    /**
+     * Supply the stream that serves one assembled request, superseding the
+     * registered LLM adapter for this step. A listener that owns the request's
+     * route returns its stream without calling `next()`; every other listener
+     * calls `next()`. The returned stream replaces adapter dispatch for the
+     * attempt, so it must yield the full {@link StreamChunk} vocabulary and end
+     * with one usage and one finish frame. Retry, cancellation, and durable
+     * settlement stay with the loop.
+     * @param payload.agent - the agent whose step issues the request.
+     * @param payload.turn - the turn containing the request.
+     * @param payload.step - the step containing the request.
+     * @param payload.selection - the model selection this step captured.
+     * @param payload.request - the fully assembled request.
+     * @param payload.signal - the step's abort signal.
+     * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+     * @mode waterfall
+     */
+    'agent/step-stream'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; selection: Readonly<ModelSelection>; request: GenerateOptions; signal: AbortSignal }, next: () => Promise<AgentStepStream | undefined>): Promise<AgentStepStream | undefined>
     /**
      * Handle one failed model-request attempt before the loop retries or closes
      * its step. A listener returns `{ kind: 'retry' }` without calling `next()`

@@ -319,6 +319,10 @@
 
     - id: commands
       name: '@deepseek-ai/dsh-commands'
+    - id: omp-rpc
+      name: '@deepseek-ai/dsh-omp-rpc'
+      config:
+        executable: omp
 
     - id: command-feedback
       name: '@deepseek-ai/dsh-command-feedback'
